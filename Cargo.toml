@@ -2,6 +2,19 @@
 name = "jsh"
 version = "0.0.0"
 authors = ["James Whaley <juicy66173@gmail.com>"]
+description = "An experiment at making a fast, hookable shell program."
+license = "MIT/Apache-2.0"
+readme = "README.md"
 edition = "2018"
+
+documentation = "https://docs.rs/jsh"
+homepage = "https://github.com/Juici/jsh"
+repository = "https://github.com/Juici/jsh"
+
+categories = []
+keywords = []
+
+[features]
+default = []
 
 [dependencies]
