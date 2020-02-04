@@ -1,0 +1,7 @@
+[package]
+name = "jsh"
+version = "0.0.0"
+authors = ["James Whaley <juicy66173@gmail.com>"]
+edition = "2018"
+
+[dependencies]
