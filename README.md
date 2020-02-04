@@ -2,16 +2,12 @@
 
 [![CI][ci-badge]][ci-link]
 [![Crates.io][cargo-badge]][cargo-link]
-[![Documentation][docs-badge]][docs-link]
 
-[ci-link]: https://github.com/Juici/strife/actions?query=workflow%3ACI
-[ci-badge]: https://img.shields.io/github/workflow/status/Juici/strife/CI.svg
+[ci-link]: https://github.com/Juici/jsh/actions?query=workflow%3ACI
+[ci-badge]: https://img.shields.io/github/workflow/status/Juici/jsh/CI.svg
 
-[cargo-link]: https://crates.io/crates/strife
-[cargo-badge]: https://img.shields.io/crates/v/strife.svg
-
-[docs-link]: https://docs.rs/strife
-[docs-badge]: https://docs.rs/strife/badge.svg
+[cargo-link]: https://crates.io/crates/jsh
+[cargo-badge]: https://img.shields.io/crates/v/jsh.svg
 
 
 *This is project is a work-in-progress experiment.*
