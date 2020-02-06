@@ -2,7 +2,9 @@
 name = "jsh"
 version = "0.0.0"
 authors = ["James Whaley <juicy66173@gmail.com>"]
-description = "An experiment at making a fast, hookable shell program."
+description = """
+An experiment at making a fast, hookable shell program.
+"""
 license = "MIT/Apache-2.0"
 readme = "README.md"
 edition = "2018"
@@ -18,3 +20,9 @@ keywords = []
 default = []
 
 [dependencies]
+anyhow = "1.0"
+clap = "2.33"
+pkg = "3.0.0"
+thiserror = "1.0"
+
+termion = "1.5"
