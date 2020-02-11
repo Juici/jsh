@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::cli::app::{App, AppSpec, Return};
+use crate::cli::app::{App, AppSpec, AppState, Return};
 use crate::cli::tty::Tty;
 
 pub struct Editor {
@@ -11,7 +11,10 @@ impl Editor {
     pub fn new(tty: Tty) -> Editor {
         // TODO: Namespace etc.
 
-        let app_spec = AppSpec { tty };
+        let app_spec = AppSpec {
+            tty,
+            state: AppState::default(),
+        };
 
         let app = App::new(app_spec);
 

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 
@@ -10,16 +11,19 @@ const INPUT_CHANNEL_SIZE: usize = 128;
 pub struct EventLoopTx {
     input_tx: Sender<Event>,
     return_tx: Sender<Result<Return>>,
+    redraw_tx: Sender<Redraw>,
 }
 
 impl Clone for EventLoopTx {
     fn clone(&self) -> Self {
         let input_tx = self.input_tx.clone();
         let return_tx = self.return_tx.clone();
+        let redraw_tx = self.redraw_tx.clone();
 
         EventLoopTx {
             input_tx,
             return_tx,
+            redraw_tx,
         }
     }
 }
@@ -29,8 +33,22 @@ impl EventLoopTx {
         Ok(self.input_tx.send(event).await?)
     }
 
-    pub async fn send_return(&mut self, ret: Result<Return>) -> Result<()> {
-        Ok(self.return_tx.send(ret).await?)
+    pub async fn send_return(&mut self, ret: Result<Return>) -> Result<bool> {
+        match self.return_tx.try_send(ret) {
+            Ok(()) => Ok(true),
+            Err(TrySendError::Full(_)) => Ok(false), // TODO: Maybe return an `Err(Return)` value.
+            Err(err @ TrySendError::Closed(_)) => Err(anyhow::anyhow!(err)),
+        }
+    }
+
+    pub async fn send_redraw(&mut self, full: bool, size: Option<(u16, u16)>) -> Result<()> {
+        let flags = if full {
+            RedrawFlags::FULL
+        } else {
+            RedrawFlags::empty()
+        };
+
+        Ok(self.redraw_tx.send(Redraw { size, flags }).await?)
     }
 }
 
@@ -38,11 +56,11 @@ pub struct EventLoop {
     input_rx: Receiver<Event>,
     return_rx: Receiver<Result<Return>>,
 
-    handle_tx: Option<Sender<Event>>,
-    redraw_tx: Option<Sender<RedrawFlag>>,
+    event_tx: Option<Sender<Event>>,
+    redraw_tx: Option<Sender<Redraw>>,
 
-    inner_redraw_tx: Mutex<Sender<InnerRedrawFlag>>,
-    inner_redraw_rx: Receiver<InnerRedrawFlag>,
+    inner_redraw_tx: Mutex<Sender<Redraw>>,
+    inner_redraw_rx: Receiver<Redraw>,
 }
 
 impl EventLoop {
@@ -56,52 +74,52 @@ impl EventLoop {
             input_rx,
             return_rx,
 
-            handle_tx: None,
+            event_tx: None,
             redraw_tx: None,
 
-            inner_redraw_tx: Mutex::new(inner_redraw_tx),
+            inner_redraw_tx: Mutex::new(inner_redraw_tx.clone()),
             inner_redraw_rx,
         };
 
         let event_loop_tx = EventLoopTx {
             input_tx,
             return_tx,
+            redraw_tx: inner_redraw_tx,
         };
 
         (event_loop, event_loop_tx)
     }
 
-    pub fn set_handle_tx(&mut self, handle_tx: Sender<Event>) {
-        self.handle_tx = Some(handle_tx);
+    pub fn set_event_tx(&mut self, event_tx: Sender<Event>) {
+        self.event_tx = Some(event_tx);
     }
 
-    pub fn set_redraw_tx(&mut self, redraw_tx: Sender<RedrawFlag>) {
+    pub fn set_redraw_tx(&mut self, redraw_tx: Sender<Redraw>) {
         self.redraw_tx = Some(redraw_tx);
     }
 
-    pub async fn redraw(&self, full: bool) -> Result<()> {
-        let mut tx = self.inner_redraw_tx.lock().await;
-
-        let flag = if full {
-            InnerRedrawFlag::Full
-        } else {
-            InnerRedrawFlag::Redraw
+    pub async fn run(&mut self) -> Result<Return> {
+        let mut redraw = Redraw {
+            size: None,
+            flags: RedrawFlags::empty(),
         };
 
-        tx.send(flag).await?;
-
-        Ok(())
-    }
-
-    pub async fn run(&mut self) -> Result<Return> {
         loop {
+            // Send redraw.
+            if let Some(redraw_tx) = self.redraw_tx.as_mut() {
+                redraw_tx.send(redraw).await?;
+            }
+            redraw.flags = RedrawFlags::empty();
+
             tokio::select! {
+                // Received an event.
                 Some(event) = self.input_rx.recv() => {
                     self.handle_event(event).await?;
 
+                    // Keep consuming available events to minimize redraws.
                     'consume_events: loop {
                         if let Ok(ret) = self.return_rx.try_recv() {
-                            self.handle_redraw(RedrawFlag::Final).await?;
+                            self.handle_redraw(RedrawFlags::FINAL).await?;
                             return ret;
                         }
 
@@ -111,33 +129,58 @@ impl EventLoop {
                         }
                     }
                 }
+                // Received return message.
                 Some(ret) = self.return_rx.recv() => {
-                    self.handle_redraw(RedrawFlag::Final).await?;
+                    self.handle_redraw(RedrawFlags::FINAL).await?;
                     return ret;
+                }
+                // Received a redraw request.
+                Some(Redraw { size, flags }) = self.inner_redraw_rx.recv() => {
+                    // Update size if sent.
+                    if let Some(size) = size {
+                        redraw.size = Some(size);
+                    }
+
+                    redraw.flags = flags;
                 }
             }
         }
     }
 
-    async fn handle_event(&self, event: Event) -> Result<()> {
-        println!("recv event: {:?}", event); // TODO
+    async fn handle_event(&mut self, event: Event) -> Result<()> {
+        if let Some(event_tx) = self.event_tx.as_mut() {
+            event_tx.send(event).await?;
+        }
         Ok(())
     }
 
-    async fn handle_redraw(&self, redraw: RedrawFlag) -> Result<()> {
-        println!("redraw: {:?}", redraw); // TODO
+    async fn handle_redraw(&mut self, flags: RedrawFlags) -> Result<()> {
+        if let Some(redraw_tx) = self.redraw_tx.as_mut() {
+            redraw_tx.send(Redraw { size: None, flags }).await?;
+        }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RedrawFlag {
-    Full,
-    Final,
+bitflags::bitflags! {
+    pub struct RedrawFlags: u8 {
+        const FULL = 0b01;
+        const FINAL = 0b10;
+    }
+}
+
+impl RedrawFlags {
+    pub fn is_final(self) -> bool {
+        self.contains(RedrawFlags::FINAL)
+    }
+
+    pub fn is_full(self) -> bool {
+        self.contains(RedrawFlags::FULL)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum InnerRedrawFlag {
-    Redraw,
-    Full,
+pub struct Redraw {
+    pub size: Option<(u16, u16)>,
+    pub flags: RedrawFlags,
 }

@@ -35,7 +35,7 @@ pub fn setup(stdin: &Stdin, stdout: Arc<Stdout>) -> Result<RestoreTerm> {
     term.c_lflag &= !termios::ICANON; // Disable buffered input.
     term.c_lflag &= !termios::ECHO; // Disable echoed output.
 
-    //    term.c_lflag &= !termios::ISIG; // Intercept signals.
+    term.c_lflag &= !termios::ISIG; // Intercept signals.
 
     term.c_cc[termios::VMIN] = 1; // Minimum of 1 character for non-canon read.
     term.c_cc[termios::VTIME] = 0; // Timeout instantly for non-canon read.

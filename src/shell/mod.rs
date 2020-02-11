@@ -44,7 +44,6 @@ impl Shell {
 
             match line {
                 Return::Input(line) => println!("read line: {}", line),
-                Return::Break => println!("break"),
                 Return::Exit => {
                     println!("exit");
                     return Ok(());

@@ -27,7 +27,7 @@ futures = "0.3"
 pkg = "3.0.0"
 thiserror = "1.0"
 
-tokio = { version = "0.2", features = ["fs", "io-driver", "io-util", "io-std", "macros", "process", "rt-core", "signal", "sync", "time"] }
+tokio = { version = "0.2", features = ["fs", "io-driver", "io-util", "io-std", "macros", "process", "rt-core", "sync", "time"] }
 
 libc = "0.2"
 crossterm = { version = "0.16", features = ["event-stream"] }
