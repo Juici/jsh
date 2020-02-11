@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::cli::Args;
+use crate::args::Args;
+use crate::cli::app::Return;
+use crate::cli::tty::Tty;
+use crate::editor::Editor;
 
 pub struct Shell {}
 
@@ -13,11 +16,11 @@ impl Shell {
         Ok(Shell {})
     }
 
-    pub fn exec_command(self, _cmd: &str) -> Result<()> {
+    pub async fn exec_command(self, _cmd: &str) -> Result<()> {
         todo!("read statements from cmd string")
     }
 
-    pub fn exec_files(self, files: &[PathBuf]) -> Result<()> {
+    pub async fn exec_files(self, files: &[PathBuf]) -> Result<()> {
         for file in files {
             let file = File::open(file)?;
             let _buffer = BufReader::new(file);
@@ -28,15 +31,25 @@ impl Shell {
         Ok(())
     }
 
-    pub fn interactive(self) -> Result<()> {
+    pub async fn interactive(self) -> Result<()> {
+        // TODO: Check isatty.
+        let mut editor = Editor::new(Tty::std());
+
+        // TODO: Source config files.
+
         // TODO: Initialize editor.
 
-        Ok(())
-    }
-}
+        loop {
+            let line = editor.read_line().await?;
 
-impl Drop for Shell {
-    fn drop(&mut self) {
-        // TODO: Restore terminal settings.
+            match line {
+                Return::Input(line) => println!("read line: {}", line),
+                Return::Break => println!("break"),
+                Return::Exit => {
+                    println!("exit");
+                    return Ok(());
+                }
+            }
+        }
     }
 }

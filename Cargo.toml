@@ -21,8 +21,14 @@ default = []
 
 [dependencies]
 anyhow = "1.0"
+bitflags = "1.2"
 clap = "2.33"
+futures = "0.3"
 pkg = "3.0.0"
 thiserror = "1.0"
 
-termion = "1.5"
+tokio = { version = "0.2", features = ["fs", "io-driver", "io-util", "io-std", "macros", "process", "rt-core", "signal", "sync", "time"] }
+
+libc = "0.2"
+crossterm = { version = "0.16", features = ["event-stream"] }
+termios = "0.3"
