@@ -33,22 +33,47 @@ impl EventLoopTx {
         Ok(self.input_tx.send(event).await?)
     }
 
-    pub async fn send_return(&mut self, ret: Result<Return>) -> Result<bool> {
-        match self.return_tx.try_send(ret) {
+    #[inline]
+    async fn inner_send_return(
+        tx: &mut Sender<Result<Return>>,
+        ret: Result<Return>,
+    ) -> Result<bool> {
+        match tx.try_send(ret) {
             Ok(()) => Ok(true),
             Err(TrySendError::Full(_)) => Ok(false), // TODO: Maybe return an `Err(Return)` value.
             Err(err @ TrySendError::Closed(_)) => Err(anyhow::anyhow!(err)),
         }
     }
 
-    pub async fn send_redraw(&mut self, full: bool, size: Option<(u16, u16)>) -> Result<()> {
+    pub async fn send_return(&mut self, ret: Result<Return>) -> Result<bool> {
+        Self::inner_send_return(&mut self.return_tx, ret).await
+    }
+
+    pub async fn send_return_clone(&self, ret: Result<Return>) -> Result<bool> {
+        Self::inner_send_return(&mut self.return_tx.clone(), ret).await
+    }
+
+    #[inline]
+    async fn inner_send_redraw(
+        tx: &mut Sender<Redraw>,
+        full: bool,
+        size: Option<(u16, u16)>,
+    ) -> Result<()> {
         let flags = if full {
             RedrawFlags::FULL
         } else {
             RedrawFlags::empty()
         };
 
-        Ok(self.redraw_tx.send(Redraw { size, flags }).await?)
+        Ok(tx.send(Redraw { size, flags }).await?)
+    }
+
+    pub async fn send_redraw(&mut self, full: bool, size: Option<(u16, u16)>) -> Result<()> {
+        Self::inner_send_redraw(&mut self.redraw_tx, full, size).await
+    }
+
+    pub async fn send_redraw_clone(&self, full: bool, size: Option<(u16, u16)>) -> Result<()> {
+        Self::inner_send_redraw(&mut self.redraw_tx.clone(), full, size).await
     }
 }
 

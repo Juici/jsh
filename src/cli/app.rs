@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc::{self, Receiver};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::cli::event_loop::{EventLoop, EventLoopTx, Redraw};
 use crate::cli::tty::{Event, KeyCode, KeyEvent, KeyModifiers, Tty};
@@ -193,6 +193,45 @@ impl App {
                 Err(err) => Err(err),
             },
         }
+    }
+
+    pub async fn redraw(&self) -> Result<()> {
+        self.event_loop_tx.send_redraw_clone(false, None).await
+    }
+
+    pub async fn redraw_full(&self) -> Result<()> {
+        self.event_loop_tx.send_redraw_clone(true, None).await
+    }
+
+    pub async fn commit_eof(&self) -> Result<()> {
+        self.event_loop_tx
+            .send_return_clone(Ok(Return::Exit))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn commit_line(&self) -> Result<()> {
+        // TODO: Copy code buffer and send to return_tx.
+        Ok(())
+    }
+
+    pub async fn notify<S: Into<String>>(&self, note: S) -> Result<()> {
+        // Mutate state.
+        {
+            let mut state = self.state.lock().await;
+
+            let notes: &mut Option<Vec<String>> = &mut state.notes;
+
+            let note = note.into();
+            match notes {
+                Some(notes) => notes.push(note),
+                notes @ None => *notes = Some(vec![note]),
+            }
+        }
+
+        self.redraw().await?;
+
+        Ok(())
     }
 }
 
