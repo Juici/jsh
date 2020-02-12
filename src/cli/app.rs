@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::Mutex;
 
-use crate::cli::event_loop::{EventLoop, EventLoopTx, Redraw};
 use crate::cli::tty::{Event, KeyCode, KeyEvent, KeyModifiers, Tty};
 
 // TODO: Add more to AppSpec.
@@ -15,13 +14,13 @@ pub struct AppSpec {
 }
 
 pub struct App {
-    event_loop: EventLoop,
-    event_loop_tx: EventLoopTx,
+    redraw_tx: Sender<Redraw>,
+    redraw_rx: Receiver<Redraw>,
 
-    event_rx: Arc<Mutex<Receiver<Event>>>,
-    redraw_rx: Arc<Mutex<Receiver<Redraw>>>,
+    return_tx: Sender<Result<Return>>,
+    return_rx: Receiver<Result<Return>>,
 
-    pub tty: Arc<Tty>,
+    pub tty: Tty,
 
     pub state: Arc<Mutex<AppState>>,
 }
@@ -43,196 +42,216 @@ impl App {
         // TODO: Prompts.
         // TODO: Highlighting?
 
-        let (mut event_loop, event_loop_tx) = EventLoop::new();
-
-        const EVENT_CHANNEL_SIZE: usize = 128;
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_SIZE);
-
         const REDRAW_CHANNEL_SIZE: usize = 8;
         let (redraw_tx, redraw_rx) = mpsc::channel(REDRAW_CHANNEL_SIZE);
 
-        event_loop.set_event_tx(event_tx);
-        event_loop.set_redraw_tx(redraw_tx);
+        let (return_tx, return_rx) = mpsc::channel(1);
 
         App {
-            event_loop,
-            event_loop_tx,
+            redraw_tx,
+            redraw_rx,
 
-            event_rx: Arc::new(Mutex::new(event_rx)),
-            redraw_rx: Arc::new(Mutex::new(redraw_rx)),
+            return_tx,
+            return_rx,
 
-            tty: Arc::new(tty),
+            tty,
 
             state: Arc::new(Mutex::new(state)),
         }
     }
 
+    async fn handle_event(&mut self, event: Event) -> Result<()> {
+        // TODO
+
+        match event {
+            // EOF on Ctrl-D.
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+            }) => self.commit_eof().await?,
+            // Discard line on Ctrl-C.
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+            }) => {
+                // TODO: Reset line buffer state.
+                // TODO: Trigger prompts.
+
+                println!("handle ctrl-c");
+            }
+            Event::Resize(cols, rows) => {
+                self.redraw_tx
+                    .send(Redraw {
+                        size: Some((cols, rows)),
+                        flags: RedrawFlags::FULL,
+                    })
+                    .await?;
+            }
+            event => {
+                // TODO: Send event to code area.
+                // TODO: Update prompts.
+
+                println!("handle event: {:?}", event);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_redraw(&mut self, redraw: Redraw) -> Result<()> {
+        // TODO
+        println!("handle redraw: {:?}", redraw);
+
+        let Redraw { size, flags } = redraw;
+
+        let (_width, _height) = match size {
+            Some((w, h)) => (w, h),
+            None => self.tty.size()?,
+        };
+
+        let _notes: Vec<String> = {
+            let mut state = self.state.lock().await;
+
+            const EMPTY_NOTES: Vec<String> = Vec::new();
+            state.notes.take().unwrap_or(EMPTY_NOTES)
+        };
+
+        // TODO: Render notes.
+
+        if flags.is_final() {
+            // TODO: Redraw code area.
+            // TODO: Render app.
+
+            // TODO: tty.update_buffer(...).await?;
+            self.tty.reset_buffer();
+        } else {
+            // TODO: Redraw code area.
+            // TODO: Render app.
+
+            // TODO: tty.update_buffer(...).await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn read_line(&mut self) -> Result<Return> {
         // TODO: Before read line.
+        // TODO: Drop for after read line and reset states.
 
         let _restore = self.tty.setup()?;
 
-        let read_loop_handle: tokio::task::JoinHandle<Result<()>> = {
-            let tty = self.tty.clone();
-            let mut event_loop_tx = self.event_loop_tx.clone();
+        // Redraw state.
+        let mut redraw = Redraw {
+            size: None,
+            flags: RedrawFlags::empty(),
+        };
 
-            tokio::spawn(async move {
-                loop {
-                    let read: Result<Option<Event>> = tty.read().await;
+        // TODO: Trigger prompts.
 
-                    match read {
-                        // Send event to event loop.
-                        Ok(Some(event)) => event_loop_tx.send_input(event).await?,
+        loop {
+            // Redraw.
+            self.handle_redraw(redraw).await?;
+            redraw.flags = RedrawFlags::empty();
+
+            tokio::select! {
+                // Received event from terminal.
+                event = self.tty.read() => {
+                    match event {
+                        // Handle event.
+                        Ok(Some(event)) => {
+                            self.handle_event(event).await?;
+
+                            // Keep consuming available events to minimize redraws.
+                            'consume_events: loop {
+                                // Received return message.
+                                if let Ok(ret) = self.return_rx.try_recv() {
+                                    // Final redraw.
+                                    redraw.flags.insert(RedrawFlags::FINAL);
+                                    self.handle_redraw(redraw).await?;
+
+                                    return ret;
+                                }
+
+                                // Handle available events.
+                                match self.tty.try_read().await? {
+                                    Some(event) => self.handle_event(event).await?,
+                                    None => break 'consume_events,
+                                }
+                            }
+                        }
                         // Input stream closed.
-                        Ok(None) => return Ok(()),
+                        Ok(None) => return Ok(Return::Exit),
                         // Read error.
                         Err(err) => {
-                            // TODO: Specific error handling?
+                            // TODO: Handle recoverable and unrecoverable events.
                             return Err(err);
                         }
                     }
                 }
-            })
-        };
-
-        let event_handle: tokio::task::JoinHandle<Result<()>> = {
-            let event_rx = self.event_rx.clone();
-            let mut event_loop_tx = self.event_loop_tx.clone();
-
-            tokio::spawn(async move {
-                while let Some(event) = event_rx.lock().await.recv().await {
-                    match event {
-                        // Ctrl-D, exit.
-                        Event::Key(KeyEvent {
-                            code: KeyCode::Char('d'),
-                            modifiers: KeyModifiers::CONTROL,
-                        }) => {
-                            event_loop_tx.send_return(Ok(Return::Exit)).await?;
-                        }
-                        // Ctrl-C, reset line buffer.
-                        Event::Key(KeyEvent {
-                            code: KeyCode::Char('c'),
-                            modifiers: KeyModifiers::CONTROL,
-                        }) => {
-                            println!("reset line buffer");
-                        }
-                        Event::Resize(cols, rows) => {
-                            event_loop_tx.send_redraw(true, Some((cols, rows))).await?;
-                        }
-                        event => {
-                            // TODO: Handle event.
-                            println!("handle event: {:?}", event);
-                        }
+                // Received redraw message.
+                Some(Redraw { size, flags }) = self.redraw_rx.recv() => {
+                    // Update size if sent.
+                    if let Some(size) = size {
+                        redraw.size = Some(size);
                     }
+                    redraw.flags.insert(flags);
                 }
-
-                Ok(())
-            })
-        };
-
-        let redraw_handle: tokio::task::JoinHandle<Result<()>> = {
-            let tty = self.tty.clone();
-            let state = self.state.clone();
-
-            let redraw_rx = self.redraw_rx.clone();
-
-            tokio::spawn(async move {
-                while let Some(redraw) = redraw_rx.lock().await.recv().await {
-                    // TODO: Handle redraw.
-                    println!("handle redraw: {:?}", redraw);
-
-                    let Redraw { size, flags } = redraw;
-
-                    let (_width, _height) = match size {
-                        Some((w, h)) => (w, h),
-                        None => tty.size()?,
-                    };
-
-                    let _notes: Vec<String> = {
-                        let mut state = state.lock().await;
-
-                        const EMPTY_NOTES: Vec<String> = Vec::new();
-                        state.notes.take().unwrap_or(EMPTY_NOTES)
-                    };
-
-                    // TODO: Render notes.
-
-                    if flags.is_final() {
-                        // TODO: Redraw code area.
-                        // TODO: Render app.
-
-                        // TODO: tty.update_and_reset_buffer(...).await?;
-                    } else {
-                        // TODO: Redraw code area.
-                        // TODO: Render app.
-
-                        // TODO: tty.update_buffer(...).await?;
-                    }
-                }
-
-                Ok(())
-            })
-        };
-
-        tokio::select! {
-            // Event loop.
-            ret = self.event_loop.run() => ret,
-            // Read loop.
-            ret = read_loop_handle => match ret? {
-                Ok(()) => Ok(Return::Exit), // The stream has closed.
-                Err(err) => Err(err),
-            },
-            // Event handler.
-            ret = event_handle => match ret? {
-                Ok(()) => unreachable!(), // Should never return.
-                Err(err) => Err(err),
-            },
-            // Redraw handler.
-            ret = redraw_handle => match ret? {
-                Ok(()) => unreachable!(), // Should never return.
-                Err(err) => Err(err),
-            },
-        }
-    }
-
-    pub async fn redraw(&self) -> Result<()> {
-        self.event_loop_tx.send_redraw_clone(false, None).await
-    }
-
-    pub async fn redraw_full(&self) -> Result<()> {
-        self.event_loop_tx.send_redraw_clone(true, None).await
-    }
-
-    pub async fn commit_eof(&self) -> Result<()> {
-        self.event_loop_tx
-            .send_return_clone(Ok(Return::Exit))
-            .await?;
-        Ok(())
-    }
-
-    pub async fn commit_line(&self) -> Result<()> {
-        // TODO: Copy code buffer and send to return_tx.
-        Ok(())
-    }
-
-    pub async fn notify<S: Into<String>>(&self, note: S) -> Result<()> {
-        // Mutate state.
-        {
-            let mut state = self.state.lock().await;
-
-            let notes: &mut Option<Vec<String>> = &mut state.notes;
-
-            let note = note.into();
-            match notes {
-                Some(notes) => notes.push(note),
-                notes @ None => *notes = Some(vec![note]),
+                // Received return message.
+                Some(ret) = self.return_rx.recv() => return ret,
+                // TODO: Prompt updates.
+                // TODO: Highlighter updates.
             }
         }
+    }
 
-        self.redraw().await?;
+    //    pub async fn redraw(&mut self) -> Result<()> {
+    //        self.redraw_tx
+    //            .send(Redraw {
+    //                size: None,
+    //                flags: RedrawFlags::empty(),
+    //            })
+    //            .await?;
+    //        Ok(())
+    //    }
+    //
+    //    pub async fn redraw_full(&mut self) -> Result<()> {
+    //        self.redraw_tx
+    //            .send(Redraw {
+    //                size: None,
+    //                flags: RedrawFlags::FULL,
+    //            })
+    //            .await?;
+    //        Ok(())
+    //    }
 
+    pub async fn commit_eof(&mut self) -> Result<()> {
+        self.return_tx.send(Ok(Return::Exit)).await?;
         Ok(())
     }
+
+    //    pub async fn commit_line(&mut self) -> Result<()> {
+    //        // TODO: Copy code buffer and send to return_tx.
+    //        Ok(())
+    //    }
+    //
+    //    pub async fn notify<S: Into<String>>(&mut self, note: S) -> Result<()> {
+    //        // Mutate state.
+    //        {
+    //            let mut state = self.state.lock().await;
+    //
+    //            let notes: &mut Option<Vec<String>> = &mut state.notes;
+    //
+    //            let note = note.into();
+    //            match notes {
+    //                Some(notes) => notes.push(note),
+    //                notes @ None => *notes = Some(vec![note]),
+    //            }
+    //        }
+    //
+    //        self.redraw().await?;
+    //
+    //        Ok(())
+    //    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,4 +260,27 @@ pub enum Return {
     Input(String),
     /// Exit (Ctrl-D).
     Exit,
+}
+
+bitflags::bitflags! {
+    pub struct RedrawFlags: u8 {
+        const FULL = 0b01;
+        const FINAL = 0b10;
+    }
+}
+
+impl RedrawFlags {
+    pub fn is_final(self) -> bool {
+        self.contains(RedrawFlags::FINAL)
+    }
+
+    pub fn is_full(self) -> bool {
+        self.contains(RedrawFlags::FULL)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Redraw {
+    pub size: Option<(u16, u16)>,
+    pub flags: RedrawFlags,
 }
