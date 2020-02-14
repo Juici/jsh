@@ -23,12 +23,14 @@ default = []
 anyhow = "1.0"
 bitflags = "1.2"
 clap = "2.33"
-futures = "0.3"
 pkg = "3.0.0"
 thiserror = "1.0"
 
+async-trait = "0.1"
+futures = "0.3"
 tokio = { version = "0.2", features = ["fs", "io-driver", "io-util", "io-std", "macros", "process", "rt-core", "sync", "time"] }
 
-libc = "0.2"
 crossterm = { version = "0.16", features = ["event-stream"] }
+libc = "0.2"
 termios = "0.3"
+unicode-width = "0.1"

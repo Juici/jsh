@@ -1,17 +1,23 @@
+mod builder;
+
+use std::borrow::Cow;
 use std::fmt::{self, Debug, Write};
 use std::iter::IntoIterator;
 use std::ops::{Bound, Deref, DerefMut, RangeBounds};
 
-use super::style::Style;
-use super::utils::wcswidth;
+use crate::cli::term::style::Style;
+use crate::cli::term::utils::wcswidth;
 
-const DEFAULT_LINE: u16 = 1;
-const DEFAULT_COL: u16 = 1;
+pub use self::builder::BufferBuilder;
+
+const DEFAULT_LINE: u16 = 0;
+const DEFAULT_COL: u16 = 0;
 
 /// An indivisible unit on the screen. It is not necessarily 1 column wide.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Cell {
-    pub text: String,
+    // TODO: Replace with an enum { String(Cow<'static, str>), Char(char) }.
+    pub text: Cow<'static, str>,
     pub style: Option<Style>,
 }
 
@@ -48,16 +54,29 @@ impl Line {
         Line(Vec::with_capacity(width as usize))
     }
 
+    pub fn width(&self) -> u16 {
+        Self::width_slice(self)
+    }
+
+    #[inline]
+    pub fn width_slice(slice: &[Cell]) -> u16 {
+        slice
+            .iter()
+            .map(|cell| wcswidth(&cell.text))
+            .fold(0u16, std::ops::Add::add)
+    }
+
     /// Find the column of the first difference between this and another line.
     pub fn find_difference(&self, other: &Line) -> Option<usize> {
-        for (i, cell) in self.into_iter().enumerate() {
-            if i >= other.len() || Some(cell) != other.get(i) {
-                return Some(i);
+        for (i, cell) in self.iter().enumerate() {
+            match other.get(i) {
+                Some(other_cell) if cell == other_cell => {}
+                _ => return Some(i),
             }
         }
 
         if self.len() < other.len() {
-            return Some(other.len());
+            return Some(self.len());
         }
 
         None
@@ -152,6 +171,10 @@ impl Buffer {
         },
     };
 
+    pub fn builder(width: u16) -> BufferBuilder {
+        BufferBuilder::new(width)
+    }
+
     pub fn new(width: u16) -> Buffer {
         let lines = Lines(vec![Line::new(width)]);
         let dot = Pos::default();
@@ -162,7 +185,7 @@ impl Buffer {
     /// Returns the column the cursor is in.
     pub fn column(&self) -> u16 {
         match self.lines.0.last() {
-            Some(line) => line.iter().map(|cell| wcswidth(&cell.text)).sum(),
+            Some(line) => line.width(),
             None => DEFAULT_COL,
         }
     }
@@ -172,10 +195,10 @@ impl Buffer {
         match self.lines.0.len().checked_sub(1) {
             Some(line) => {
                 // SAFETY: `line` is guaranteed to be < `self.lines.0.len()`.
-                let l = unsafe { self.lines.get_unchecked(line) };
+                let last_line = unsafe { self.lines.get_unchecked(line) };
 
                 let line = line as u16;
-                let col = l.iter().map(|cell| wcswidth(&cell.text)).sum();
+                let col = last_line.width();
 
                 Pos { line, col }
             }
@@ -225,6 +248,22 @@ impl Buffer {
             }
         }
     }
+
+    pub fn extend(&mut self, buffer: &Buffer, move_dot: bool) {
+        if move_dot {
+            self.dot.line = buffer.dot.line + self.lines.len() as u16;
+            self.dot.col = buffer.dot.col;
+        }
+        self.lines.extend_from_slice(&buffer.lines);
+    }
+
+    pub fn new_line(&mut self, move_dot: bool, width: Option<u16>) {
+        if move_dot {
+            self.dot.line += 1;
+            self.dot.col = DEFAULT_COL;
+        }
+        self.lines.push(Line::new(width.unwrap_or(self.width)))
+    }
 }
 
 impl Debug for Buffer {
@@ -232,8 +271,11 @@ impl Debug for Buffer {
         // Header.
         writeln!(
             f,
-            "Buffer {{ width: {}, dot: ({}, {}), lines: ... }}",
-            self.width, self.dot.col, self.dot.line,
+            "Buffer {{ width: {}, dot: ({}, {}), lines: {} }}",
+            self.width,
+            self.dot.col,
+            self.dot.line,
+            self.lines.len(),
         )?;
 
         // Top border.

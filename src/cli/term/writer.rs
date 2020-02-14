@@ -5,7 +5,6 @@ use anyhow::Result;
 use crossterm::{cursor, terminal};
 
 use super::buffer::{Buffer, Line, Pos};
-use super::utils::wcswidth;
 
 const CLEAR_UNTIL_NEWLINE: terminal::Clear = terminal::Clear(terminal::ClearType::UntilNewLine);
 const CLEAR_FROM_CURSOR_DOWN: terminal::Clear =
@@ -48,6 +47,7 @@ impl Writer {
     ) -> Result<()> {
         let old_buffer = &mut self.buffer;
 
+        // Check if the screen width has changed, if so force full refresh.
         if buffer.width != old_buffer.width && !old_buffer.lines.is_empty() {
             old_buffer.lines.clear();
             refresh = true;
@@ -56,12 +56,12 @@ impl Writer {
         let mut out = BufWriter::new(self.stdout.lock());
 
         // Hide cursor.
-        write!(out, "{}", cursor::Hide)?;
+        crossterm::queue!(out, cursor::Hide)?;
 
         // Move cursor to start of buffer.
-        match &old_buffer.dot.line {
+        match old_buffer.dot.line {
             0 => {}
-            &line => write!(out, "{}", cursor::MoveUp(line as u16))?,
+            line => crossterm::queue!(out, cursor::MoveUp(line as u16))?,
         }
         out.write_all(b"\r")?;
 
@@ -70,7 +70,9 @@ impl Writer {
             //
             // Note: tmux may save the screen, so we write a space before clearing then
             // return to first column.
-            write!(out, " {}\r", CLEAR_FROM_CURSOR_DOWN)?;
+            out.write_all(b" ")?;
+            crossterm::queue!(out, CLEAR_FROM_CURSOR_DOWN)?;
+            out.write_all(b"\r")?;
         }
 
         let mut style = None;
@@ -82,7 +84,7 @@ impl Writer {
                     new_style if style != new_style => {
                         match new_style {
                             Some(new_style) => write!(out, "\x1b[0;{}m", new_style)?,
-                            None => out.write_all(b"\x1b[m")?,
+                            None => out.write_all(b"\x1b[0;m")?,
                         }
                         style = new_style;
                     }
@@ -97,7 +99,7 @@ impl Writer {
                     cells => {
                         for cell in cells.into_iter() {
                             switch_style!(cell.style);
-                            out.write_all(cell.text.as_bytes())?;
+                            write!(out, "{}", cell.text)?;
                         }
                     }
                 }
@@ -108,7 +110,8 @@ impl Writer {
             for line in &notes.lines {
                 write_cells!(line);
                 switch_style!(None);
-                writeln!(out, "{}", CLEAR_UNTIL_NEWLINE)?;
+                crossterm::queue!(out, CLEAR_UNTIL_NEWLINE)?;
+                out.write_all(b"\n")?;
             }
 
             // // XXX Hacky.
@@ -117,10 +120,7 @@ impl Writer {
             // }
         }
 
-        for (i, line) in buffer.lines.iter().enumerate() {
-            let i: usize = i;
-            let line: &Line = line;
-
+        'write_lines: for (i, line) in buffer.lines.iter().enumerate() {
             if i > 0 {
                 out.write_all(b"\n")?;
             }
@@ -128,52 +128,69 @@ impl Writer {
             // First cell where `buffer` and `old_buffer` differ for the line.
             let mut j = 0;
 
-            // If not a full refresh attempt to avoid rewriting unchanged sections of line.
+            // If not a full refresh, attempt to avoid rewriting unchanged sections of line.
             if !refresh {
                 if let Some(old_line) = old_buffer.lines.get(i) {
+                    // Find the offset of the first difference, if found the offset is guaranteed to
+                    // be at most `line.len()`.
                     match line.find_difference(old_line) {
                         Some(diff) => j = diff,
                         // No need to update current line.
-                        None => continue,
+                        None => continue 'write_lines,
                     }
 
                     // Move to first differing column if necessary.
-                    let first_col = line[..j].iter().map(|cell| wcswidth(&cell.text)).sum();
+                    let first_col = Line::width_slice(&line[..j]);
                     if first_col > 0 {
-                        write!(out, "{}", cursor::MoveRight(first_col))?;
+                        crossterm::queue!(out, cursor::MoveRight(first_col))?;
                     }
 
                     // Clear the rest of the line if necessary.
                     if j < old_line.len() {
                         switch_style!(None);
-                        writeln!(out, "{}", CLEAR_UNTIL_NEWLINE)?;
+                        crossterm::queue!(out, CLEAR_UNTIL_NEWLINE)?;
                     }
                 }
             }
 
-            write_cells!(line[j..]);
+            // Write any remaining cells in the cell.
+            if j < line.len() {
+                write_cells!(line[j..]);
+            }
         }
 
         if !refresh && old_buffer.lines.len() > buffer.lines.len() {
             // If the old buffer is higher, clear old content.
             switch_style!(None);
-            write!(
-                out,
-                "{}\n{}{}",
-                cursor::SavePosition,
-                CLEAR_FROM_CURSOR_DOWN,
-                cursor::RestorePosition,
-            )?;
-        }
 
+            // write!(out, "\n{}{}", CLEAR_FROM_CURSOR_DOWN,
+            // cursor::MoveUp(1))?;
+
+            // out.write_all(b"\n")?;
+            // crossterm::queue!(out, CLEAR_FROM_CURSOR_DOWN,
+            // cursor::MoveUp(1))?;
+
+            // crossterm::queue!(
+            //     out,
+            //     cursor::SavePosition,
+            //     cursor::MoveDown(1),
+            //     cursor::MoveToColumn(0),
+            //     CLEAR_FROM_CURSOR_DOWN,
+            //     cursor::RestorePosition,
+            // )?;
+
+            crossterm::queue!(out, cursor::SavePosition)?;
+            out.write_all(b"\n")?;
+            crossterm::queue!(out, CLEAR_FROM_CURSOR_DOWN, cursor::RestorePosition)?;
+        }
         switch_style!(None);
 
         // Move the cursor to the buffer `dot`.
         let cursor = buffer.cursor();
-        write_move(&mut out, cursor, buffer.dot)?;
+        write_delta_pos(&mut out, cursor, buffer.dot)?;
 
         // Show cursor.
-        write!(out, "{}", cursor::Show)?;
+        crossterm::queue!(out, cursor::Show)?;
 
         // Flush buffer.
         out.flush()?;
@@ -185,15 +202,18 @@ impl Writer {
     }
 }
 
-fn write_move<W: Write>(w: &mut W, from: Pos, to: Pos) -> Result<()> {
-    if from.line < to.line {
-        write!(w, "{}", cursor::MoveDown(to.line - from.line))?;
-    } else if from.line > to.line {
-        write!(w, "{}", cursor::MoveUp(from.line - to.line))?;
+fn write_delta_pos<W: Write>(w: &mut W, from: Pos, to: Pos) -> Result<()> {
+    match to.line.checked_sub(from.line) {
+        Some(0) | None => match from.line.checked_sub(to.line) {
+            Some(0) | None => {}
+            Some(up) => crossterm::queue!(w, cursor::MoveUp(up))?,
+        },
+        Some(down) => crossterm::queue!(w, cursor::MoveDown(down))?,
     }
 
+    w.write_all(b"\r")?;
     if to.col > 0 {
-        write!(w, "\r{}", cursor::MoveRight(to.col))?;
+        crossterm::queue!(w, cursor::MoveRight(to.col))?;
     }
 
     Ok(())

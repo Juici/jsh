@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::sync::mpsc::{self, Receiver, Sender};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
+use crate::cli::code_area::{CodeArea, CodeAreaSpec, CodeAreaState};
+use crate::cli::term::buffer::Buffer;
 use crate::cli::tty::{Event, KeyCode, KeyEvent, KeyModifiers, Tty};
+use crate::cli::widget::{Handle, Render};
 
 // TODO: Add more to AppSpec.
 pub struct AppSpec {
@@ -20,6 +23,8 @@ pub struct App {
     return_tx: Sender<Result<Return>>,
     return_rx: Receiver<Result<Return>>,
 
+    code_area: CodeArea,
+
     pub tty: Tty,
 
     pub state: Arc<Mutex<AppState>>,
@@ -29,9 +34,29 @@ pub struct AppState {
     pub notes: Option<Vec<String>>,
 }
 
+impl AppState {
+    pub fn reset_state(&mut self) {
+        *self = AppState::default();
+    }
+}
+
 impl Default for AppState {
     fn default() -> Self {
         AppState { notes: None }
+    }
+}
+
+struct AfterLine {
+    app_state: Arc<Mutex<AppState>>,
+    code_area_state: Arc<RwLock<CodeAreaState>>,
+}
+
+impl Drop for AfterLine {
+    fn drop(&mut self) {
+        futures::executor::block_on(async {
+            self.app_state.lock().await.reset_state();
+            self.code_area_state.write().await.reset_state();
+        });
     }
 }
 
@@ -41,11 +66,17 @@ impl App {
 
         // TODO: Prompts.
         // TODO: Highlighting?
+        // TODO: CodeArea.
 
         const REDRAW_CHANNEL_SIZE: usize = 8;
         let (redraw_tx, redraw_rx) = mpsc::channel(REDRAW_CHANNEL_SIZE);
 
         let (return_tx, return_rx) = mpsc::channel(1);
+
+        let code_area = CodeArea::new(CodeAreaSpec {
+            state: CodeAreaState::default(),
+            return_tx: return_tx.clone(),
+        });
 
         App {
             redraw_tx,
@@ -54,15 +85,32 @@ impl App {
             return_tx,
             return_rx,
 
+            code_area,
+
             tty,
 
             state: Arc::new(Mutex::new(state)),
         }
     }
 
-    async fn handle_event(&mut self, event: Event) -> Result<()> {
-        // TODO
+    #[inline]
+    pub async fn mutate_state<F>(&self, f: F)
+    where
+        F: FnOnce(&mut AppState) -> (),
+    {
+        let mut state = self.state.lock().await;
+        f(&mut state);
+    }
 
+    async fn reset_all_states(&mut self) {
+        self.mutate_state(AppState::reset_state).await;
+
+        self.code_area
+            .mutate_state(CodeAreaState::reset_state)
+            .await;
+    }
+
+    async fn handle_event(&mut self, event: Event) -> Result<()> {
         match event {
             // EOF on Ctrl-D.
             Event::Key(KeyEvent {
@@ -74,11 +122,16 @@ impl App {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::CONTROL,
             }) => {
-                // TODO: Reset line buffer state.
-                // TODO: Trigger prompts.
+                self.reset_all_states().await;
 
-                println!("handle ctrl-c");
+                // TODO: Trigger prompts.
             }
+            // Event::Key(KeyEvent {
+            //     code: KeyCode::Char('?'),
+            //     ..
+            // }) => {
+            //     println!("buffer: {:?}", self.tty.buffer());
+            // }
             Event::Resize(cols, rows) => {
                 self.redraw_tx
                     .send(Redraw {
@@ -88,10 +141,9 @@ impl App {
                     .await?;
             }
             event => {
-                // TODO: Send event to code area.
-                // TODO: Update prompts.
+                self.code_area.handle(event).await;
 
-                println!("handle event: {:?}", event);
+                // TODO: Update prompts.
             }
         }
 
@@ -99,46 +151,74 @@ impl App {
     }
 
     async fn handle_redraw(&mut self, redraw: Redraw) -> Result<()> {
-        // TODO
-        println!("handle redraw: {:?}", redraw);
-
         let Redraw { size, flags } = redraw;
 
-        let (_width, _height) = match size {
+        let (width, height) = match size {
             Some((w, h)) => (w, h),
             None => self.tty.size()?,
         };
 
-        let _notes: Vec<String> = {
+        let buf_notes: Option<Buffer> = {
             let mut state = self.state.lock().await;
 
-            const EMPTY_NOTES: Vec<String> = Vec::new();
-            state.notes.take().unwrap_or(EMPTY_NOTES)
+            match state.notes.take() {
+                Some(notes) => Self::render_notes(notes, width).await,
+                None => None,
+            }
         };
 
-        // TODO: Render notes.
-
         if flags.is_final() {
-            // TODO: Redraw code area.
-            // TODO: Render app.
+            let mut buf = Self::render_app(&mut self.code_area, width, height).await;
+            buf.new_line(true, Some(width));
 
-            // TODO: tty.update_buffer(...).await?;
+            self.tty.update_buffer(buf_notes, buf, flags.is_full())?;
             self.tty.reset_buffer();
         } else {
-            // TODO: Redraw code area.
-            // TODO: Render app.
+            let buf = Self::render_app(&mut self.code_area, width, height).await;
 
-            // TODO: tty.update_buffer(...).await?;
+            self.tty.update_buffer(buf_notes, buf, flags.is_full())?;
         }
 
         Ok(())
     }
 
+    async fn render_notes(notes: Vec<String>, width: u16) -> Option<Buffer> {
+        if notes.is_empty() {
+            return None;
+        }
+
+        let mut buf = Buffer::builder(width);
+        for (i, note) in notes.into_iter().enumerate() {
+            if i > 0 {
+                buf.newline();
+            }
+            buf.write_str(&note);
+        }
+
+        Some(buf.buffer())
+    }
+
+    async fn render_app(code_area: &mut CodeArea, width: u16, height: u16) -> Buffer {
+        let buf = code_area.render(width, height).await;
+
+        // TODO: Addon?
+
+        buf
+    }
+
     pub async fn read_line(&mut self) -> Result<Return> {
         // TODO: Before read line.
+
         // TODO: Drop for after read line and reset states.
 
+        // Setup line and hold restore drop handle.
         let _restore = self.tty.setup()?;
+
+        // After line drop handle.
+        let _after_line = AfterLine {
+            app_state: self.state.clone(),
+            code_area_state: self.code_area.state.clone(),
+        };
 
         // Redraw state.
         let mut redraw = Redraw {
@@ -183,7 +263,7 @@ impl App {
                         Ok(None) => return Ok(Return::Exit),
                         // Read error.
                         Err(err) => {
-                            // TODO: Handle recoverable and unrecoverable events.
+                            // TODO: Handle recoverable and unrecoverable errors.
                             return Err(err);
                         }
                     }
@@ -204,36 +284,11 @@ impl App {
         }
     }
 
-    //    pub async fn redraw(&mut self) -> Result<()> {
-    //        self.redraw_tx
-    //            .send(Redraw {
-    //                size: None,
-    //                flags: RedrawFlags::empty(),
-    //            })
-    //            .await?;
-    //        Ok(())
-    //    }
-    //
-    //    pub async fn redraw_full(&mut self) -> Result<()> {
-    //        self.redraw_tx
-    //            .send(Redraw {
-    //                size: None,
-    //                flags: RedrawFlags::FULL,
-    //            })
-    //            .await?;
-    //        Ok(())
-    //    }
-
     pub async fn commit_eof(&mut self) -> Result<()> {
         self.return_tx.send(Ok(Return::Exit)).await?;
         Ok(())
     }
 
-    //    pub async fn commit_line(&mut self) -> Result<()> {
-    //        // TODO: Copy code buffer and send to return_tx.
-    //        Ok(())
-    //    }
-    //
     //    pub async fn notify<S: Into<String>>(&mut self, note: S) -> Result<()> {
     //        // Mutate state.
     //        {
