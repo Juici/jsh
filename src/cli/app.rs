@@ -5,6 +5,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::cli::code_area::{CodeArea, CodeAreaSpec, CodeAreaState};
+use crate::cli::prompt::{Prompt, PromptConfig, PromptHandle};
 use crate::cli::term::buffer::Buffer;
 use crate::cli::tty::{Event, KeyCode, KeyEvent, KeyModifiers, Tty};
 use crate::cli::widget::{Handle, Render};
@@ -14,6 +15,9 @@ pub struct AppSpec {
     pub tty: Tty,
 
     pub state: AppState,
+
+    pub prompt: Option<(Prompt, PromptHandle)>,
+    pub rprompt: Option<(Prompt, PromptHandle)>,
 }
 
 pub struct App {
@@ -28,6 +32,11 @@ pub struct App {
     pub tty: Tty,
 
     pub state: Arc<Mutex<AppState>>,
+
+    pub prompt: Prompt,
+    pub prompt_handle: PromptHandle,
+    pub rprompt: Prompt,
+    pub rprompt_handle: PromptHandle,
 }
 
 pub struct AppState {
@@ -62,9 +71,13 @@ impl Drop for AfterLine {
 
 impl App {
     pub fn new(spec: AppSpec) -> App {
-        let AppSpec { tty, state } = spec;
+        let AppSpec {
+            tty,
+            state,
+            prompt,
+            rprompt,
+        } = spec;
 
-        // TODO: Prompts.
         // TODO: Highlighting?
         // TODO: CodeArea.
 
@@ -73,7 +86,14 @@ impl App {
 
         let (return_tx, return_rx) = mpsc::channel(1);
 
+        let (prompt, prompt_handle) =
+            prompt.unwrap_or_else(|| Prompt::new(PromptConfig::default()));
+        let (rprompt, rprompt_handle) =
+            rprompt.unwrap_or_else(|| Prompt::new(PromptConfig::default()));
+
         let code_area = CodeArea::new(CodeAreaSpec {
+            prompt: prompt_handle.clone(),
+            rprompt: rprompt_handle.clone(),
             state: CodeAreaState::default(),
             return_tx: return_tx.clone(),
         });
@@ -90,6 +110,11 @@ impl App {
             tty,
 
             state: Arc::new(Mutex::new(state)),
+
+            prompt,
+            prompt_handle,
+            rprompt,
+            rprompt_handle,
         }
     }
 
@@ -123,8 +148,7 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
             }) => {
                 self.reset_all_states().await;
-
-                // TODO: Trigger prompts.
+                self.update_prompts(true).await?;
             }
             // Event::Key(KeyEvent {
             //     code: KeyCode::Char('?'),
@@ -142,11 +166,16 @@ impl App {
             }
             event => {
                 self.code_area.handle(event).await;
-
-                // TODO: Update prompts.
+                self.update_prompts(false).await?;
             }
         }
 
+        Ok(())
+    }
+
+    async fn update_prompts(&mut self, force: bool) -> Result<()> {
+        self.prompt_handle.update(force).await?;
+        self.rprompt_handle.update(force).await?;
         Ok(())
     }
 
@@ -226,7 +255,15 @@ impl App {
             flags: RedrawFlags::empty(),
         };
 
-        // TODO: Trigger prompts.
+        // Initial prompt.
+        self.update_prompts(true).await?;
+
+        let prompt_late_updates = self.prompt_handle.late_updates();
+        let rprompt_late_updates = self.rprompt_handle.late_updates();
+
+        // Late updates for prompts will remain permanently locked by the App.
+        let mut prompt_late_updates = prompt_late_updates.lock().await;
+        let mut rprompt_late_updates = rprompt_late_updates.lock().await;
 
         loop {
             // Redraw.
@@ -278,7 +315,12 @@ impl App {
                 }
                 // Received return message.
                 Some(ret) = self.return_rx.recv() => return ret,
-                // TODO: Prompt updates.
+                // Run prompts.
+                Err(err) = self.prompt.run() => return Err(err),
+                Err(err) = self.rprompt.run() => return Err(err),
+                // No need to redraw since redraw is done at start of loop.
+                _ = prompt_late_updates.recv() => {}
+                _ = rprompt_late_updates.recv() => {}
                 // TODO: Highlighter updates.
             }
         }

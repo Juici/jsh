@@ -58,6 +58,10 @@ pub struct Text {
 }
 
 impl Text {
+    pub const EMPTY: Text = Text {
+        segments: Vec::new(),
+    };
+
     pub fn plain<S>(text: S) -> Text
     where
         S: Into<String>,
@@ -77,8 +81,16 @@ impl Text {
         }
     }
 
+    pub fn push(&mut self, segment: TextSegment) {
+        self.segments.push(segment);
+    }
+
     pub fn iter(&self) -> std::slice::Iter<TextSegment> {
         self.segments.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<TextSegment> {
+        self.segments.iter_mut()
     }
 
     pub fn split_at(&self, index: usize) -> (Text, Text) {
@@ -169,11 +181,59 @@ impl Display for Text {
     }
 }
 
+impl IntoIterator for Text {
+    type Item = TextSegment;
+    type IntoIter = std::vec::IntoIter<TextSegment>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.segments.into_iter()
+    }
+}
+
 impl<'a> IntoIterator for &'a Text {
     type Item = &'a TextSegment;
     type IntoIter = std::slice::Iter<'a, TextSegment>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Text {
+    type Item = &'a mut TextSegment;
+    type IntoIter = std::slice::IterMut<'a, TextSegment>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl Extend<TextSegment> for Text {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = TextSegment>,
+    {
+        self.segments.extend(iter)
+    }
+}
+
+impl<'a> Extend<&'a TextSegment> for Text {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = &'a TextSegment>,
+    {
+        self.segments.extend(iter.into_iter().cloned())
+    }
+}
+
+impl<'a> Extend<&'a mut TextSegment> for Text {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = &'a mut TextSegment>,
+    {
+        // Apparently we don't fit the bounds for `iter.cloned()` so we just map to
+        // clone.
+        self.segments
+            .extend(iter.into_iter().map(|seg| seg.clone()))
     }
 }

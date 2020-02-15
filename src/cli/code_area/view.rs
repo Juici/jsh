@@ -1,13 +1,14 @@
+use std::sync::Arc;
+
 use super::{CodeArea, CodeBuffer, PendingCode};
 
 use crate::cli::term::buffer::BufferBuilder;
-use crate::cli::term::style::Color;
 use crate::cli::term::utils::wcswidth;
 use crate::cli::ui::Text;
 
 pub struct View {
-    prompt: Text,
-    rprompt: Text,
+    prompt: Arc<Text>,
+    rprompt: Option<Arc<Text>>,
     code: Text,
     dot: usize,
     // TODO: Errors.
@@ -15,23 +16,28 @@ pub struct View {
 
 impl View {
     pub async fn get(code_area: &CodeArea) -> View {
-        let mut state = code_area.clone_state().await;
+        let state = code_area.clone_state().await;
 
-        let (_from, _to) = patch_pending(&mut state.buffer, &state.pending);
-        let buf = state.buffer;
+        let mut code = state.buffer;
+        let (_from, _to) = patch_pending(&mut code, &state.pending);
 
         // TODO: Highlighter.
-        let code = Text::plain(buf.content);
+        let styled_code = Text::plain(code.content);
 
         // TODO: Prompts.
-        let prompt = Text::styled("$ ", |style| style.fg(Color::BrightBlue));
-        let rprompt = Text::plain("[example right prompt]");
+        let prompt = code_area.prompt.prompt().await;
+
+        let rprompt = if state.hide_rprompt {
+            None
+        } else {
+            Some(code_area.rprompt.prompt().await)
+        };
 
         View {
             prompt,
             rprompt,
-            code,
-            dot: buf.dot,
+            code: styled_code,
+            dot: code.dot,
         }
     }
 
@@ -50,23 +56,24 @@ impl View {
         buf.eager_wrap = false;
         buf.indent = 0;
 
-        let rprompt_width = self
-            .rprompt
-            .iter()
-            .map(|seg| wcswidth(&seg.text))
-            .fold(0u16, std::ops::Add::add);
+        if let Some(rprompt) = self.rprompt {
+            let rprompt_width = rprompt
+                .iter()
+                .map(|seg| wcswidth(&seg.text))
+                .fold(0u16, std::ops::Add::add);
 
-        if rprompt_width > 0 {
-            // Don't write rprompt if there is not room.
-            match buf
-                .width
-                .checked_sub(buf.col)
-                .and_then(|d| d.checked_sub(rprompt_width))
-            {
-                Some(0) | None => {}
-                Some(pad) => {
-                    buf.write_spaces(pad as usize);
-                    buf.write_text(&self.rprompt);
+            if rprompt_width > 0 {
+                // Don't write rprompt if there is not room.
+                match buf
+                    .width
+                    .checked_sub(buf.col)
+                    .and_then(|d| d.checked_sub(rprompt_width))
+                {
+                    Some(0) | None => {}
+                    Some(pad) => {
+                        buf.write_spaces(pad as usize);
+                        buf.write_text(&rprompt);
+                    }
                 }
             }
         }

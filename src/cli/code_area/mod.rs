@@ -10,21 +10,27 @@ use tokio::sync::RwLock;
 use self::view::View;
 
 use crate::cli::app::Return;
+use crate::cli::prompt::PromptHandle;
 use crate::cli::term::buffer::Buffer;
 use crate::cli::tty::{Event, KeyCode, KeyEvent};
 use crate::cli::widget::{Handle, Render, Widget};
 
+// TODO: Overlay handler.
+// TODO: Highlighter.
 pub struct CodeAreaSpec {
-    // TODO: Overlay handler.
-    // TODO: Highlighter.
-    // TODO: Prompts.
-    // TODO: Submit.
     pub state: CodeAreaState,
+
+    pub prompt: PromptHandle,
+    pub rprompt: PromptHandle,
+
     pub return_tx: Sender<Result<Return>>,
 }
 
 pub struct CodeArea {
     pub state: Arc<RwLock<CodeAreaState>>,
+
+    pub prompt: PromptHandle,
+    pub rprompt: PromptHandle,
 
     inserts: String,
     last_buffer: Option<CodeBuffer>,
@@ -116,10 +122,18 @@ impl Handle for CodeArea {
 
 impl CodeArea {
     pub fn new(spec: CodeAreaSpec) -> CodeArea {
-        let CodeAreaSpec { state, return_tx } = spec;
+        let CodeAreaSpec {
+            state,
+            return_tx,
+            prompt,
+            rprompt,
+        } = spec;
 
         CodeArea {
             state: Arc::new(RwLock::new(state)),
+
+            prompt,
+            rprompt,
 
             inserts: String::new(),
             last_buffer: None,
